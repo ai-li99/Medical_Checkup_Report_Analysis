@@ -16,7 +16,7 @@ export default defineConfig({
   server: {
     // 显式绑定 IPv4：Node 会把 localhost 解析成 ::1，只监听 IPv6 时
     // 浏览器直接打开 http://127.0.0.1:5173 会连不上。
-    host: '127.0.0.1',
+    host: '0.0.0.0',
     port: 5173,
     proxy: {
       // 前端统一请求 /api/**，由 dev server 转发到 FastAPI，规避跨域问题。

@@ -76,7 +76,7 @@ function useExample(example) {
 
     <footer class="ask__foot">
       <p class="ask__hint muted">
-        Ctrl / ⌘ + Enter 发送 · 追问可省略条件，但只继承最近 2 轮上下文
+        Ctrl / ⌘ + Enter 发送 · 追问可省略条件，但尽量描述完整
       </p>
       <button class="btn btn--primary" type="button" :disabled="!canSubmit" @click="submit">
         <span v-if="busy" class="spinner" aria-hidden="true" />

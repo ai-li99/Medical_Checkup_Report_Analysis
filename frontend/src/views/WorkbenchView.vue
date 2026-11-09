@@ -129,7 +129,10 @@ const FLOW = [
         <div class="filebar__main">
           <h1 class="filebar__name">{{ payload?.filename }}</h1>
           <div class="filebar__meta">
-            <span class="badge badge--primary">{{ (payload?.type || '').toUpperCase() }}</span>
+            <span v-if="payload?.type" class="badge badge--primary">
+              {{ payload.type.toUpperCase() }}
+            </span>
+            <span v-if="payload?.fromHistory" class="badge badge--ok">历史会话</span>
             <span class="badge">{{ formatNumber(payload?.rows ?? 0) }} 行</span>
             <span class="badge">{{ payload?.columns?.length ?? 0 }} 列</span>
             <span v-if="payload?.selectedSheets?.length" class="badge">

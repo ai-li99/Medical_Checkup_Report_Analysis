@@ -1,6 +1,8 @@
 import { computed, reactive } from 'vue'
 
 import {
+  fetchTurnDetail as apiFetchTurnDetail,
+  resumeSession as apiResumeSession,
   selectSheets as apiSelectSheets,
   submit as apiSubmit,
   uploadFile as apiUploadFile,
@@ -10,6 +12,9 @@ import { pushToast } from '@/composables/useToast'
 import { validateFile } from '@/utils/file'
 
 const SHEET_MISMATCH_KEYWORD = '列名不一致'
+
+/** 从历史恢复时最多回填多少条完整轮次，避免一次打出几十个请求。 */
+const RESUME_TURN_LIMIT = 20
 
 let messageSeed = 0
 
@@ -23,6 +28,8 @@ export const session = reactive({
   uploadProgress: 0,
   selectionBusy: false,
   asking: false,
+  /** 正在从历史恢复会话 */
+  resuming: false,
   /** 上传/选表合并后的文件信息 */
   payload: null,
   /** 本轮对话：[{ id, question, status, answer, result, querySpec, ... }] */
@@ -41,6 +48,7 @@ export function resetSession() {
   session.uploadProgress = 0
   session.selectionBusy = false
   session.asking = false
+  session.resuming = false
   session.payload = null
   session.messages = []
   session.blockingError = ''
@@ -153,6 +161,7 @@ function createMessage(question) {
     degraded: false,
     error: '',
     attempts: 1,
+    turnId: null,
   })
 }
 
@@ -165,6 +174,7 @@ function applyAnswer(message, data) {
   message.degraded = Boolean(data.degraded)
   message.error = data.error ?? ''
   message.elapsedMs = data.elapsed_ms ?? Date.now() - message.startedAt
+  message.turnId = data.turn_id ?? null
 }
 
 function handleAskError(message, error) {
@@ -232,5 +242,71 @@ export async function retryMessage(message) {
     handleAskError(message, error)
   } finally {
     session.asking = false
+  }
+}
+
+/* ---------------- 历史会话恢复 ---------------- */
+
+let turnSeed = 0
+
+/** 把 GET /api/history/{turn_id} 的结果转换成 AnswerCard 能直接渲染的 message。 */
+export function turnToMessage(turn) {
+  turnSeed += 1
+  return {
+    id: `turn-${turn.turn_id}-${turnSeed}`,
+    turnId: turn.turn_id ?? null,
+    question: turn.question ?? '',
+    status: 'done',
+    startedAt: Date.parse(turn.created_at) || Date.now(),
+    elapsedMs: turn.elapsed_ms ?? 0,
+    answer: turn.answer ?? '',
+    result: turn.result ?? null,
+    querySpec: turn.query_spec ?? null,
+    rawOutput: '',
+    degraded: Boolean(turn.degraded),
+    error: turn.error ?? '',
+    attempts: 1,
+  }
+}
+
+/**
+ * 恢复历史会话：先 resume 重建后端上下文，再并发拉取最近 N 轮的完整内容回填。
+ * @param {string} sessionId
+ * @returns {Promise<{ ok: true, turns: number } | { ok: false, error: any }>}
+ */
+export async function resumeFromHistory(sessionId) {
+  if (!sessionId || session.resuming) return { ok: false, error: null }
+
+  session.resuming = true
+  try {
+    const data = await apiResumeSession(sessionId)
+
+    session.payload = {
+      sessionId: data.session_id,
+      filename: data.filename,
+      type: '',
+      rows: data.row_count ?? 0,
+      columns: data.columns ?? [],
+      sheets: [],
+      selectedSheets: [],
+      merged: false,
+      needsSheetSelection: false,
+      fromHistory: true,
+      message: data.message ?? '',
+    }
+    session.blockingError = ''
+    session.stage = 'ready'
+
+    const turns = Array.isArray(data.turns) ? data.turns.slice(-RESUME_TURN_LIMIT) : []
+    const details = await Promise.all(
+      turns.map((turn) => apiFetchTurnDetail(turn.turn_id).catch(() => null)),
+    )
+    session.messages = details.filter(Boolean).map(turnToMessage)
+
+    return { ok: true, turns: session.messages.length }
+  } catch (error) {
+    return { ok: false, error }
+  } finally {
+    session.resuming = false
   }
 }

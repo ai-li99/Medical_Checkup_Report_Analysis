@@ -7,6 +7,50 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+# ---------- 认证 ----------
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserInfo(BaseModel):
+    user_id: int
+    username: str
+    created_at: str
+
+
+class AuthResponse(UserInfo):
+    token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=1)
+
+
+class TokenPairResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str = ""
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=1, max_length=200)
+    old_password: str = Field(default="", max_length=200)
+
+
 # ---------- 文件 ----------
 class SheetInfo(BaseModel):
     name: str
@@ -92,3 +136,62 @@ class SubmitResponse(BaseModel):
     degraded: bool = False
     error: str = ""
     elapsed_ms: int = 0
+    turn_id: int = 0
+
+
+# ---------- 历史记录 ----------
+class HistorySessionItem(BaseModel):
+    session_id: str
+    filename: str
+    rows: int
+    columns: int
+    turn_count: int
+    last_question: str = ""
+    last_asked_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class HistorySessionsResponse(BaseModel):
+    total: int
+    items: list[HistorySessionItem] = Field(default_factory=list)
+
+
+class TurnSummary(BaseModel):
+    turn_id: int
+    question: str
+    answer_preview: str = ""
+    degraded: bool = False
+    created_at: str = ""
+
+
+class SessionTurnsResponse(BaseModel):
+    session_id: str
+    filename: str
+    rows: int
+    columns: int
+    turns: list[TurnSummary] = Field(default_factory=list)
+
+
+class TurnDetailResponse(BaseModel):
+    turn_id: int
+    session_id: str
+    question: str
+    answer: str
+    query_spec: dict[str, Any] | None = None
+    result: QueryResult | None = None
+    degraded: bool = False
+    error: str = ""
+    elapsed_ms: int = 0
+    created_at: str = ""
+
+
+class ResumeResponse(BaseModel):
+    session_id: str
+    filename: str
+    row_count: int
+    column_count: int
+    columns: list[ColumnInfo] = Field(default_factory=list)
+    conversation_id: str = ""
+    turns: list[TurnSummary] = Field(default_factory=list)
+    message: str = ""

@@ -39,6 +39,10 @@ DIFY_APP2_PATH = "/chat-messages"
 DIFY_TIMEOUT_SECONDS = _env_int("DIFY_TIMEOUT_SECONDS", 180)
 DIFY_USER_PREFIX = "medical-report"
 
+# 给应用1 的追问上下文：预算只约束历史轮次，当前问题总是完整发送
+APP1_CONTEXT_MAX_CHARS = _env_int("APP1_CONTEXT_MAX_CHARS", 1500)
+APP1_CONTEXT_QUESTION_CHARS = _env_int("APP1_CONTEXT_QUESTION_CHARS", 300)
+
 # ---------- 上传 ----------
 UPLOAD_DIR = Path(_env_str("UPLOAD_DIR", "uploads"))
 if not UPLOAD_DIR.is_absolute():
@@ -60,3 +64,28 @@ SCHEMA_MAX_COLUMNS = 120
 CELL_MAX_CHARS = 50
 
 API_TITLE = "体检报告分析后端"
+
+# ---------- 认证 ----------
+# 令牌签名密钥：改动后所有已发出的令牌立即失效
+AUTH_SECRET = _env_str("AUTH_SECRET")
+AUTH_ACCESS_TTL_SECONDS = _env_int("AUTH_ACCESS_TTL_SECONDS", 30 * 60)
+AUTH_REFRESH_TTL_SECONDS = _env_int("AUTH_REFRESH_TTL_SECONDS", 30 * 24 * 3600)
+AUTH_PASSWORD_MIN = _env_int("AUTH_PASSWORD_MIN", 8)
+AUTH_PASSWORD_MAX = _env_int("AUTH_PASSWORD_MAX", 64)
+
+# 登录失败限制：15 分钟内「用户名+IP」失败 5 次或单 IP 失败 20 次即锁定 15 分钟
+AUTH_LOGIN_MAX_FAILURES = _env_int("AUTH_LOGIN_MAX_FAILURES", 5)
+AUTH_LOGIN_IP_MAX_FAILURES = _env_int("AUTH_LOGIN_IP_MAX_FAILURES", 20)
+AUTH_LOGIN_WINDOW_SECONDS = _env_int("AUTH_LOGIN_WINDOW_SECONDS", 15 * 60)
+AUTH_LOGIN_LOCK_SECONDS = _env_int("AUTH_LOGIN_LOCK_SECONDS", 15 * 60)
+
+# ---------- 数据库 ----------
+DB_PATH = Path(_env_str("DB_PATH", "data/app.db"))
+if not DB_PATH.is_absolute():
+    DB_PATH = BACKEND_DIR / DB_PATH
+AUTH_DB_PATH = DB_PATH  # 兼容旧名
+
+# ---------- 历史记录 ----------
+HISTORY_PAGE_SIZE = _env_int("HISTORY_PAGE_SIZE", 20)
+HISTORY_MAX_PAGE_SIZE = _env_int("HISTORY_MAX_PAGE_SIZE", 100)
+HISTORY_TURNS_FOR_CONTEXT = _env_int("HISTORY_TURNS_FOR_CONTEXT", 50)

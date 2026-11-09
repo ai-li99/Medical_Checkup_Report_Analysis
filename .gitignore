@@ -12,6 +12,10 @@ backend/.env
 backend/uploads/
 uploads/
 
+# 账号数据库（含密码哈希，不入库）
+backend/data/
+data/
+
 # 前端
 frontend/node_modules/
 frontend/dist/

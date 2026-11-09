@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import threading
 import time
 import uuid
@@ -11,7 +13,8 @@ from typing import Any
 
 import pandas as pd
 
-from config import ALLOWED_SUFFIXES, MAX_ROWS, MAX_SESSIONS, UPLOAD_DIR
+import chat_store
+from config import ALLOWED_SUFFIXES, HISTORY_TURNS_FOR_CONTEXT, MAX_ROWS, MAX_SESSIONS, UPLOAD_DIR
 from schema_card import build_schema_card, column_infos
 from models import ColumnInfo
 
@@ -25,6 +28,7 @@ class SessionNotFoundError(ValueError):
 
 
 SHEET_MISMATCH_MESSAGE = "选择的sheet的列名不一致，请重新上传"
+_SESSION_GONE = "会话不存在或已过期，请重新上传文件"
 
 
 @dataclass
@@ -34,6 +38,7 @@ class Session:
     filename: str
     kind: str
     path: Path
+    user_id: int | None = None
     sheet_frames: dict[str, pd.DataFrame] = field(default_factory=dict)
     selected_sheets: list[str] = field(default_factory=list)
     merged: bool = False
@@ -47,7 +52,8 @@ class Session:
     created_at: float = 0.0
 
     @property
-    def user_id(self) -> str:
+    def dify_user_id(self) -> str:
+        """传给 Dify 的终端用户标识（按会话隔离记忆）。"""
         return f"session-{self.session_id}"
 
     @property
@@ -83,27 +89,65 @@ def _remove_file(path: Path) -> None:
 def _register(session: Session) -> Session:
     with _LOCK:
         _SESSIONS[session.session_id] = session
+        # 只淘汰内存缓存，不删文件：历史记录还要靠原始文件恢复会话
         while len(_SESSIONS) > MAX_SESSIONS:
             oldest_id = min(_SESSIONS, key=lambda key: _SESSIONS[key].created_at)
             if oldest_id == session.session_id:
                 break
-            dropped = _SESSIONS.pop(oldest_id, None)
-            if dropped is not None:
-                _remove_file(dropped.path)
+            _SESSIONS.pop(oldest_id, None)
     return session
 
 
-def get_session(session_id: str) -> Session:
+def get_session(session_id: str, user_id: int | None = None) -> Session:
+    """取会话；内存里没有时自动从数据库 + 原始文件恢复（历史会话可继续追问）。"""
     with _LOCK:
         session = _SESSIONS.get(session_id or "")
-    if session is None:
-        raise SessionNotFoundError("会话不存在或已过期，请重新上传文件")
-    return session
+    if session is not None:
+        if user_id is not None and session.user_id != user_id:
+            raise SessionNotFoundError(_SESSION_GONE)
+        return session
+    return restore_session(session_id, user_id)
 
 
 # --------------------------------------------------------------------------
 # 解析
 # --------------------------------------------------------------------------
+# 体检数据里常见 "50岁"、或化验值被存成文本（"45"）这类列：不转成数值就既不能比较大小、
+# 也不能求平均。只转换「数字 + 可选单位后缀」且占比 ≥ 90% 的列。
+_NUMERIC_TEXT = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*\D{0,8}\s*$")
+_NUMERIC_TEXT_MIN_RATIO = 0.9
+_NUMERIC_TEXT_MAX_ABS = 1e15
+
+
+def _coerce_numeric_text(frame: pd.DataFrame) -> pd.DataFrame:
+    """把「数字 + 可选单位」的文本列转成数值。
+
+    保护：带前导零的编号（如 "007"）与超过 1e15 的数字不转，避免丢失编号信息或丢精度。
+    """
+    for name in frame.columns:
+        column = frame[name]
+        if pd.api.types.is_numeric_dtype(column.dtype) or pd.api.types.is_datetime64_any_dtype(column.dtype):
+            continue
+        values = column.dropna()
+        if values.empty:
+            continue
+        text = values.astype("string").str.strip()
+        extracted = text.str.extract(_NUMERIC_TEXT, expand=False)
+        if extracted.notna().mean() < _NUMERIC_TEXT_MIN_RATIO:
+            continue
+        numeric = pd.to_numeric(extracted, errors="coerce")
+        max_abs = numeric.abs().max()
+        if pd.notna(max_abs) and float(max_abs) > _NUMERIC_TEXT_MAX_ABS:
+            continue
+        if bool(text.str.match(r"^0\d").any()):
+            continue
+        frame[name] = pd.to_numeric(
+            column.astype("string").str.strip().str.extract(_NUMERIC_TEXT, expand=False),
+            errors="coerce",
+        )
+    return frame
+
+
 def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
     frame = frame.copy()
     frame.columns = [str(column).strip() for column in frame.columns]
@@ -128,6 +172,7 @@ def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
         keep.append(column)
     frame = frame.loc[:, keep]
     frame = frame.dropna(how="all")
+    frame = _coerce_numeric_text(frame)
     return frame.reset_index(drop=True)
 
 
@@ -180,17 +225,24 @@ def _read_excel_sheets(path: Path) -> dict[str, pd.DataFrame]:
 # --------------------------------------------------------------------------
 # 载入 / 合并
 # --------------------------------------------------------------------------
-def _load_frame(session: Session, frame: pd.DataFrame, sheets: list[str], merged: bool) -> None:
+def _load_frame(
+    session: Session,
+    frame: pd.DataFrame,
+    sheets: list[str],
+    merged: bool,
+    reset_conversation: bool = True,
+) -> None:
     session.df = frame
     session.selected_sheets = list(sheets)
     session.merged = merged
     session.columns_info = column_infos(frame)
     session.schema_card = build_schema_card(frame, session.filename, session.selected_sheets, merged)
-    # 数据变了，之前的对话记忆与待提交问题都作废
-    session.conversation_id = ""
     session.pending_message = ""
     session.message_id = ""
-    session.history.clear()
+    if reset_conversation:
+        # 数据变了，之前的对话记忆与历史都作废
+        session.conversation_id = ""
+        session.history.clear()
 
 
 def _merge_frames(frames: dict[str, pd.DataFrame], names: list[str]) -> pd.DataFrame:
@@ -210,7 +262,67 @@ def _merge_frames(frames: dict[str, pd.DataFrame], names: list[str]) -> pd.DataF
     return pd.concat(parts, ignore_index=True)
 
 
-def create_session(filename: str, data: bytes) -> Session:
+def _frames_from_disk(path: Path, kind: str) -> dict[str, pd.DataFrame]:
+    if kind == "csv":
+        frame = _read_csv(path)
+        _check_frame(frame)
+        return {"CSV": frame}
+    frames = _read_excel_sheets(path)
+    if not frames:
+        raise ValueError("文件里没有可用的工作表")
+    return frames
+
+
+def restore_session(session_id: str, user_id: int | None = None) -> Session:
+    """从数据库与磁盘文件把历史会话恢复进内存。"""
+    row = chat_store.get_session_row(session_id)
+    if row is None or (user_id is not None and int(row["user_id"] or 0) != int(user_id)):
+        raise SessionNotFoundError(_SESSION_GONE)
+    path = Path(str(row["file_path"]))
+    if not path.exists():
+        raise SessionNotFoundError("原始文件已丢失，该会话只能查看历史，无法继续提问")
+    try:
+        frames = _frames_from_disk(path, str(row["file_kind"]))
+    except ValueError as exc:
+        raise SessionNotFoundError(f"原始文件无法重新读取：{exc}") from exc
+
+    session = Session(
+        session_id=row["id"],
+        file_id=row["file_id"] or "",
+        filename=row["filename"],
+        kind=row["file_kind"],
+        path=path,
+        user_id=int(row["user_id"] or 0) or None,
+        sheet_frames=frames,
+        created_at=float(time.time()),
+    )
+
+    try:
+        stored = json.loads(row["sheets"]) if row["sheets"] else []
+    except (TypeError, ValueError):
+        stored = []
+    names = [str(name) for name in stored if str(name) in frames]
+    if not names and len(frames) == 1:
+        names = list(frames)
+    if not names:
+        # 还没选过工作表：保持「待选择」状态
+        with _LOCK:
+            _SESSIONS[session.session_id] = session
+        return session
+
+    merged = bool(row["merged"]) or len(names) > 1
+    frame = _merge_frames(frames, names) if len(names) > 1 else frames[names[0]]
+    _load_frame(session, frame, names, merged=merged, reset_conversation=False)
+    session.conversation_id = row["conversation_id"] or ""
+    session.history = chat_store.list_turns_for_context(
+        session.session_id, HISTORY_TURNS_FOR_CONTEXT
+    )
+    with _LOCK:
+        _SESSIONS[session.session_id] = session
+    return session
+
+
+def create_session(filename: str, data: bytes, user_id: int | None = None) -> Session:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
         raise ValueError(f"不支持的文件类型「{suffix or '无扩展名'}」，仅支持 .xlsx 和 .csv")
@@ -224,6 +336,7 @@ def create_session(filename: str, data: bytes) -> Session:
         filename=filename,
         kind="csv" if suffix == ".csv" else "xlsx",
         path=path,
+        user_id=user_id,
         created_at=time.time(),
     )
     try:
@@ -243,6 +356,18 @@ def create_session(filename: str, data: bytes) -> Session:
     except Exception:
         _remove_file(path)
         raise
+    chat_store.save_session(
+        session_id=session.session_id,
+        file_id=file_id,
+        user_id=user_id,
+        filename=filename,
+        file_path=str(path),
+        file_kind=session.kind,
+        sheets=session.selected_sheets,
+        merged=session.merged,
+        row_count=len(session.df) if session.df is not None else 0,
+        column_count=len(session.df.columns) if session.df is not None else 0,
+    )
     return _register(session)
 
 
@@ -272,4 +397,11 @@ def apply_sheet_selection(session: Session, mode: str, sheets: list[str]) -> Ses
     frame = _merge_frames(session.sheet_frames, names)
     _check_frame(frame)
     _load_frame(session, frame, names, merged=len(names) > 1)
+    chat_store.update_session_selection(
+        session.session_id,
+        session.selected_sheets,
+        session.merged,
+        len(session.df) if session.df is not None else 0,
+        len(session.df.columns) if session.df is not None else 0,
+    )
     return session

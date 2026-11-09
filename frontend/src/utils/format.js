@@ -28,6 +28,19 @@ export function formatClock(timestamp) {
   })
 }
 
+/** 历史记录用：09-14 14:45（跨年时带上年份） */
+export function formatDateTime(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+
+  const pad = (num) => String(num).padStart(2, '0')
+  const stamp = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return date.getFullYear() === new Date().getFullYear()
+    ? stamp
+    : `${date.getFullYear()}-${stamp}`
+}
+
 /** 空单元格占位符 */
 export function displayCell(value) {
   if (value === null || value === undefined || value === '') return '—'
