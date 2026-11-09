@@ -4,10 +4,10 @@ import {
   fetchTurnDetail as apiFetchTurnDetail,
   resumeSession as apiResumeSession,
   selectSheets as apiSelectSheets,
-  submit as apiSubmit,
   uploadFile as apiUploadFile,
   uploadMessage as apiUploadMessage,
 } from '@/api'
+import { submitStream } from '@/api/stream'
 import { pushToast } from '@/composables/useToast'
 import { validateFile } from '@/utils/file'
 
@@ -56,6 +56,16 @@ export function resetSession() {
 
 export function clearBlockingError() {
   session.blockingError = ''
+}
+
+/**
+ * 某个会话被删除后调用：如果工作台正开着它，一并清空，
+ * 否则用户还能对着一个已经不存在的 session 继续提问。
+ */
+export function forgetSession(sessionId) {
+  if (sessionId && session.payload?.sessionId === sessionId) {
+    resetSession()
+  }
 }
 
 function applyUpload(data) {
@@ -152,6 +162,8 @@ function createMessage(question) {
     id: messageSeed,
     question,
     status: 'pending',
+    /** 流式阶段：generating_query | querying | answering | ''（默认解析中） */
+    stage: '',
     startedAt: Date.now(),
     elapsedMs: 0,
     answer: '',
@@ -190,6 +202,82 @@ function handleAskError(message, error) {
   pushToast(message.error, 'error')
 }
 
+/* ---------------- 流式提交 ---------------- */
+
+let streamController = null
+
+/**
+ * 跑一次 /api/submit/stream，把 stage / result / delta 增量写回 message。
+ * delta 用 60ms 节流批量刷新，避免逐字重渲染把页面拖慢。
+ */
+async function runSubmit(message) {
+  const state = { pending: '', timer: null }
+
+  const flush = () => {
+    if (state.pending) {
+      message.answer = message.answer + state.pending
+      state.pending = ''
+    }
+  }
+  const scheduleFlush = () => {
+    if (state.timer) return
+    state.timer = setTimeout(() => {
+      state.timer = null
+      flush()
+    }, 60)
+  }
+  const stopFlush = () => {
+    if (state.timer) {
+      clearTimeout(state.timer)
+      state.timer = null
+    }
+    flush()
+  }
+
+  streamController = new AbortController()
+
+  try {
+    const done = await submitStream(session.payload.sessionId, {
+      signal: streamController.signal,
+      onStage: (stage) => {
+        message.stage = stage
+      },
+      onResult: (payload) => {
+        message.result = payload.result ?? null
+        message.querySpec = payload.query_spec ?? null
+        message.degraded = Boolean(payload.degraded)
+        message.error = payload.error ?? ''
+      },
+      onDelta: (text) => {
+        state.pending += text
+        scheduleFlush()
+      },
+    })
+
+    stopFlush()
+    applyAnswer(message, done)
+  } catch (error) {
+    stopFlush()
+
+    if (error?.name === 'AbortError') {
+      message.status = 'error'
+      message.error = '已停止生成，可重试这个问题'
+      message.elapsedMs = Date.now() - message.startedAt
+      return
+    }
+
+    handleAskError(message, error)
+  } finally {
+    message.stage = ''
+    streamController = null
+  }
+}
+
+/** 中断当前正在生成的回答（对应卡片上的「停止」）。 */
+export function stopGeneration() {
+  streamController?.abort()
+}
+
 /**
  * 提问：先 upload_message 暂存问题，再 submit 取回答（submit 是同步长请求）。
  * 按 API.md §5，submit 失败时问题仍保留在服务端，因此重试可以直接重跑这两步。
@@ -213,8 +301,7 @@ export async function askQuestion(rawQuestion) {
 
   try {
     await apiUploadMessage(session.payload.sessionId, question)
-    const data = await apiSubmit(session.payload.sessionId)
-    applyAnswer(message, data)
+    await runSubmit(message)
   } catch (error) {
     handleAskError(message, error)
   } finally {
@@ -230,14 +317,18 @@ export async function retryMessage(message) {
 
   session.asking = true
   message.status = 'pending'
+  message.stage = ''
   message.startedAt = Date.now()
   message.error = ''
+  message.answer = ''
+  message.result = null
+  message.querySpec = null
+  message.degraded = false
   message.attempts += 1
 
   try {
     await apiUploadMessage(session.payload.sessionId, message.question)
-    const data = await apiSubmit(session.payload.sessionId)
-    applyAnswer(message, data)
+    await runSubmit(message)
   } catch (error) {
     handleAskError(message, error)
   } finally {

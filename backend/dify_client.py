@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -147,3 +147,66 @@ async def chat(user_query: str, data_text: str, conversation_id: str, user: str)
         "conversation_id": str(body.get("conversation_id") or conversation_id or ""),
         "message_id": str(body.get("message_id") or body.get("id") or ""),
     }
+
+
+async def chat_stream(
+    user_query: str,
+    data_text: str,
+    conversation_id: str,
+    user: str,
+) -> AsyncIterator[tuple[str, str]]:
+    """流式调用应用2，逐个产出：
+
+    - ("conversation_id", 会话 id)
+    - ("delta", 文本片段)
+    - ("error", 错误信息) 由 DifyError 表达，这里不产出
+    """
+    payload = {
+        "inputs": {"data": data_text},
+        "query": user_query,
+        "response_mode": "streaming",
+        "conversation_id": conversation_id or "",
+        "user": user,
+    }
+    url = f"{DIFY_BASE_URL}{DIFY_APP2_PATH}"
+    # 每个分片之间允许的最长间隔
+    timeout = httpx.Timeout(DIFY_TIMEOUT_SECONDS, connect=10.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST", url, headers=_headers(DIFY_APP2_KEY), json=payload
+            ) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode("utf-8", "ignore")
+                    raise DifyError(f"Dify 接口返回 {response.status_code}：{body[:500]}")
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+
+                    conversation = str(event.get("conversation_id") or "")
+                    if conversation:
+                        yield "conversation_id", conversation
+
+                    name = event.get("event")
+                    if name == "message":
+                        chunk = str(event.get("answer") or "")
+                        if chunk:
+                            yield "delta", chunk
+                    elif name == "message_end":
+                        break
+                    elif name == "error":
+                        raise DifyError(
+                            f"应用2 返回错误：{event.get('message') or json.dumps(event, ensure_ascii=False)[:300]}"
+                        )
+    except httpx.HTTPError as exc:
+        raise DifyError(f"调用 Dify 接口失败：{exc.__class__.__name__} {exc}") from exc

@@ -3,9 +3,9 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
 import AnswerCard from '@/components/AnswerCard.vue'
-import { fetchHistory, fetchSessionTurns, fetchTurnDetail } from '@/api'
+import { deleteSession, fetchHistory, fetchSessionTurns, fetchTurnDetail } from '@/api'
 import { pushToast } from '@/composables/useToast'
-import { resumeFromHistory, turnToMessage } from '@/stores/session'
+import { forgetSession, resumeFromHistory, turnToMessage } from '@/stores/session'
 import { formatDateTime, formatNumber } from '@/utils/format'
 
 const PAGE_SIZE = 20
@@ -28,6 +28,9 @@ const activeTurnId = ref(null)
 const detailLoadingId = ref(null)
 
 const resumingId = ref('')
+/** 是否处于「确认删除」状态（删除会连原始文件一起删，必须二次确认） */
+const confirmingDelete = ref(false)
+const deleting = ref(false)
 
 const hasMore = computed(() => sessions.value.length < total.value)
 const activeSession = computed(
@@ -65,6 +68,7 @@ async function selectSession(item) {
 
   activeId.value = item.session_id
   activeTurnId.value = null
+  confirmingDelete.value = false
   turns.value = []
   turnsError.value = ''
   turnsLoading.value = true
@@ -128,6 +132,60 @@ async function resume(item) {
 }
 
 onMounted(() => loadSessions())
+
+/* ---------------- 删除会话 ---------------- */
+
+function requestDelete() {
+  if (!activeSession.value || deleting.value) return
+  confirmingDelete.value = true
+}
+
+function cancelDelete() {
+  confirmingDelete.value = false
+}
+
+async function confirmDelete() {
+  const item = activeSession.value
+  if (!item || deleting.value) return
+
+  deleting.value = true
+  try {
+    const result = await deleteSession(item.session_id)
+
+    // 工作台如果正开着这个会话，一起清掉，避免继续对着已删除的 session 提问
+    forgetSession(item.session_id)
+
+    sessions.value = sessions.value.filter((entry) => entry.session_id !== item.session_id)
+    total.value = Math.max(0, total.value - 1)
+    activeId.value = ''
+    activeTurnId.value = null
+    turns.value = []
+    confirmingDelete.value = false
+
+    const turnsDeleted = Number(result?.deleted_turns) || 0
+    pushToast(
+      turnsDeleted > 0
+        ? `已删除 ${turnsDeleted} 轮对话及原始文件`
+        : '已删除该会话的记录',
+      'success',
+    )
+
+    if (sessions.value.length > 0) {
+      selectSession(sessions.value[0])
+    } else if (hasMore.value) {
+      await loadSessions()
+    }
+  } catch (error) {
+    if (error?.status === 404) {
+      pushToast('记录不存在或已被删除', 'error')
+      await loadSessions()
+    } else {
+      pushToast(error?.message ?? '删除失败，请重试', 'error')
+    }
+  } finally {
+    deleting.value = false
+  }
+}
 </script>
 
 <template>
@@ -202,15 +260,47 @@ onMounted(() => loadSessions())
                 {{ formatDateTime(activeSession.updated_at) }}
               </p>
             </div>
-            <button
-              class="btn btn--primary btn--sm"
-              type="button"
-              :disabled="Boolean(resumingId)"
-              @click="resume(activeSession)"
-            >
-              <span v-if="resumingId === activeSession.session_id" class="spinner" aria-hidden="true" />
-              {{ resumingId === activeSession.session_id ? '正在恢复…' : '继续问' }}
-            </button>
+            <div class="detail-head__actions">
+              <template v-if="confirmingDelete">
+                <span class="detail-head__warn">会连同原始文件一起删除</span>
+                <button class="btn btn--sm" type="button" :disabled="deleting" @click="cancelDelete">
+                  取消
+                </button>
+                <button
+                  class="btn btn--danger btn--sm"
+                  type="button"
+                  :disabled="deleting"
+                  @click="confirmDelete"
+                >
+                  <span v-if="deleting" class="spinner" aria-hidden="true" />
+                  {{ deleting ? '删除中…' : '确认删除' }}
+                </button>
+              </template>
+
+              <template v-else>
+                <button
+                  class="btn btn--primary btn--sm"
+                  type="button"
+                  :disabled="Boolean(resumingId) || deleting"
+                  @click="resume(activeSession)"
+                >
+                  <span
+                    v-if="resumingId === activeSession.session_id"
+                    class="spinner"
+                    aria-hidden="true"
+                  />
+                  {{ resumingId === activeSession.session_id ? '正在恢复…' : '继续问' }}
+                </button>
+                <button
+                  class="btn btn--danger-ghost btn--sm"
+                  type="button"
+                  :disabled="deleting"
+                  @click="requestDelete"
+                >
+                  删除
+                </button>
+              </template>
+            </div>
           </header>
 
           <p v-if="turnsLoading" class="card history__empty">加载中…</p>
@@ -373,6 +463,20 @@ onMounted(() => loadSessions())
   min-width: 0;
 }
 
+.detail-head__actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.detail-head__warn {
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .detail-head__name {
   font-size: 15px;
   word-break: break-all;
@@ -489,5 +593,16 @@ onMounted(() => loadSessions())
 
 .link:hover {
   text-decoration: underline;
+}
+
+@media (max-width: 560px) {
+  .detail-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .detail-head__actions {
+    justify-content: flex-start;
+  }
 }
 </style>

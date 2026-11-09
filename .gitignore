@@ -24,6 +24,7 @@ frontend/dist/
 .idea/
 .vscode/
 *.iml
+*.xml
 
 # 系统
 .DS_Store

@@ -98,6 +98,18 @@ def _register(session: Session) -> Session:
     return session
 
 
+def forget_session(session_id: str, path: Path | None = None) -> bool:
+    """删除会话时调用：清掉内存缓存并删除原始文件。文件已不在时返回 False。"""
+    with _LOCK:
+        session = _SESSIONS.pop(session_id, None)
+    target = path if path is not None else (session.path if session is not None else None)
+    if target is None:
+        return False
+    existed = target.exists()
+    _remove_file(target)
+    return existed
+
+
 def get_session(session_id: str, user_id: int | None = None) -> Session:
     """取会话；内存里没有时自动从数据库 + 原始文件恢复（历史会话可继续追问）。"""
     with _LOCK:

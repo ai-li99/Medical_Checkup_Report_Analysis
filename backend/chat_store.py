@@ -322,3 +322,14 @@ def count_turns(session_id: str) -> int:
             "SELECT COUNT(*) AS total FROM chat_turns WHERE session_id = ?", (session_id,)
         ).fetchone()
     return int(row["total"] or 0)
+
+
+def delete_session(session_id: str) -> int:
+    """删除会话及其全部问答记录，返回删除的轮数。"""
+    with _connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM chat_turns WHERE session_id = ?", (session_id,)
+        )
+        turns = int(cursor.rowcount or 0)
+        connection.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+    return turns

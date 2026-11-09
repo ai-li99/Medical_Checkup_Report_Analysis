@@ -92,3 +92,8 @@ export function fetchTurnDetail(turnId) {
 export function resumeSession(sessionId) {
   return http.post(`/sessions/${encodeURIComponent(sessionId)}/resume`)
 }
+
+/** DELETE /api/sessions/{id} —— 删除该会话的全部轮次与原始文件。 */
+export function deleteSession(sessionId) {
+  return http.delete(`/sessions/${encodeURIComponent(sessionId)}`)
+}

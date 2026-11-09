@@ -18,11 +18,11 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 import auth
@@ -30,9 +30,10 @@ import auth_store
 import chat_store
 import config
 import file_store
-from dify_client import DifyError, chat, extract_json_object, run_workflow
+from dify_client import DifyError, chat, chat_stream, extract_json_object, run_workflow, strip_reasoning
 from models import (
     AuthResponse,
+    DeleteSessionResponse,
     HistorySessionItem,
     HistorySessionsResponse,
     LoginRequest,
@@ -368,6 +369,103 @@ def _build_query_with_context(question: str, history: list[dict[str, Any]]) -> s
     )
 
 
+class _ReasoningStreamFilter:
+    """流式剥离开头的 <think>…</think>（标签可能被拆到多个 chunk 里）。"""
+
+    _OPEN = "<think"
+    _CLOSE = "</think"
+    _MAX_HOLD = 20000
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._passthrough = False
+
+    def feed(self, chunk: str) -> str:
+        if self._passthrough:
+            return chunk
+        self._buffer += chunk
+        text = self._buffer
+        lowered = text.lstrip().lower()
+
+        if lowered.startswith(self._OPEN):
+            offset = len(text) - len(lowered)
+            end = lowered.find(self._CLOSE)
+            if end == -1:
+                if len(text) > self._MAX_HOLD:
+                    self._buffer = ""
+                    self._passthrough = True
+                    return strip_reasoning(text)
+                return ""
+            close = text.find(">", offset + end)
+            if close == -1:
+                return ""
+            rest = text[close + 1 :]
+            self._buffer = ""
+            self._passthrough = True
+            return rest.lstrip("\n")
+
+        # 可能是 "<thi" 这样的半个标签，先攒着
+        if len(lowered) < len(self._OPEN) and self._OPEN.startswith(lowered):
+            return ""
+
+        self._buffer = ""
+        self._passthrough = True
+        return text
+
+    def flush(self) -> str:
+        text = self._buffer
+        self._buffer = ""
+        self._passthrough = True
+        return strip_reasoning(text)
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _persist_turn(
+    session: file_store.Session,
+    user_id: int,
+    question: str,
+    spec: dict[str, Any] | None,
+    result: dict[str, Any] | None,
+    error: str,
+    answer: str,
+    conversation_id: str,
+    elapsed_ms: int,
+) -> int:
+    """写入会话内存历史 + 数据库问答记录，返回 turn_id。"""
+    session.conversation_id = conversation_id or session.conversation_id
+    session.history.append(
+        {
+            "time": time.time(),
+            "question": question,
+            "answer": answer,
+            "query_spec": spec,
+            "kind": (result or {}).get("kind", ""),
+            "matched_rows": int((result or {}).get("matched_rows") or 0),
+        }
+    )
+    if len(session.history) > 50:
+        session.history = session.history[-50:]
+    session.pending_message = ""
+
+    turn_id = chat_store.add_turn(
+        session_id=session.session_id,
+        user_id=user_id,
+        question=question,
+        answer=answer,
+        query_spec=spec,
+        result=result,
+        matched_rows=int((result or {}).get("matched_rows") or 0),
+        degraded=bool(error),
+        error=error,
+        elapsed_ms=elapsed_ms,
+    )
+    chat_store.update_conversation(session.session_id, session.conversation_id)
+    return turn_id
+
+
 @app.get("/api/healthy")
 def get_health() -> dict[str, Any]:
     return {
@@ -492,35 +590,18 @@ async def submit(
     except DifyError as exc:
         raise DifyError(f"应用2 调用失败：{exc}") from exc
 
-    session.conversation_id = reply["conversation_id"] or session.conversation_id
-    session.history.append(
-        {
-            "time": time.time(),
-            "question": question,
-            "answer": reply["answer"],
-            "query_spec": spec,
-            "kind": (result or {}).get("kind", ""),
-            "matched_rows": int((result or {}).get("matched_rows") or 0),
-        }
-    )
-    if len(session.history) > 50:
-        session.history = session.history[-50:]
-    session.pending_message = ""
-
     elapsed_ms = int((time.perf_counter() - started) * 1000)
-    turn_id = chat_store.add_turn(
-        session_id=session.session_id,
+    turn_id = _persist_turn(
+        session=session,
         user_id=user["user_id"],
         question=question,
-        answer=reply["answer"],
-        query_spec=spec,
+        spec=spec,
         result=result,
-        matched_rows=int((result or {}).get("matched_rows") or 0),
-        degraded=bool(error),
         error=error,
+        answer=reply["answer"],
+        conversation_id=reply["conversation_id"],
         elapsed_ms=elapsed_ms,
     )
-    chat_store.update_conversation(session.session_id, session.conversation_id)
 
     return SubmitResponse(
         session_id=session.session_id,
@@ -534,6 +615,130 @@ async def submit(
         error=error,
         elapsed_ms=elapsed_ms,
         turn_id=turn_id,
+    )
+
+
+@app.post("/api/submit/stream")
+async def submit_stream(
+    payload: SubmitRequest,
+    user: dict[str, Any] = Depends(auth.get_current_user),
+) -> StreamingResponse:
+    """与 /api/submit 相同，但通过 SSE 逐段推送回答。"""
+    session = file_store.get_session(payload.session_id, user_id=user["user_id"])
+    frame = session.df
+    if frame is None:
+        raise HTTPException(
+            status_code=400, detail="请先选择要分析的工作表（调用 /api/select_sheets）"
+        )
+    question = session.pending_message.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="请先通过 /api/upload_message 提交问题")
+
+    async def event_stream() -> AsyncIterator[str]:
+        started = time.perf_counter()
+        spec: dict[str, Any] | None = None
+        result: dict[str, Any] | None = None
+        error = ""
+        conversation_id = session.conversation_id
+        answer_parts: list[str] = []
+
+        try:
+            yield _sse("stage", {"stage": "generating_query"})
+            try:
+                raw_output = await run_workflow(
+                    session.schema_card, _build_query_with_context(question, session.history)
+                )
+            except DifyError as exc:
+                yield _sse("error", {"detail": f"应用1 调用失败：{exc}", "code": "app1_failed"})
+                return
+
+            yield _sse("stage", {"stage": "querying"})
+            try:
+                spec = extract_json_object(raw_output)
+                if spec is None:
+                    raise SpecError("应用1 没有返回可解析的 JSON 查询规格")
+                result = await run_in_threadpool(execute, frame, spec)
+            except (SpecError, ValueError) as exc:
+                error = str(exc)
+                result = None
+
+            yield _sse(
+                "result",
+                {
+                    "query_spec": spec,
+                    "result": result,
+                    "degraded": bool(error),
+                    "error": error,
+                },
+            )
+            yield _sse("stage", {"stage": "answering"})
+
+            data_text = format_for_llm(
+                spec, result, error=error or None, columns=[str(column) for column in frame.columns]
+            )
+            stripper = _ReasoningStreamFilter()
+            try:
+                async for kind, value in chat_stream(
+                    question, data_text, conversation_id, session.dify_user_id
+                ):
+                    if kind == "conversation_id":
+                        conversation_id = value
+                    elif kind == "delta":
+                        text = stripper.feed(value)
+                        if text:
+                            answer_parts.append(text)
+                            yield _sse("delta", {"text": text})
+            except DifyError as exc:
+                yield _sse("error", {"detail": f"应用2 调用失败：{exc}", "code": "app2_failed"})
+                return
+
+            tail = stripper.flush()
+            if tail:
+                answer_parts.append(tail)
+                yield _sse("delta", {"text": tail})
+
+            answer = "".join(answer_parts).strip()
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            turn_id = _persist_turn(
+                session=session,
+                user_id=user["user_id"],
+                question=question,
+                spec=spec,
+                result=result,
+                error=error,
+                answer=answer,
+                conversation_id=conversation_id,
+                elapsed_ms=elapsed_ms,
+            )
+            yield _sse(
+                "done",
+                {
+                    "session_id": session.session_id,
+                    "message": question,
+                    "answer": answer,
+                    "query_spec": spec,
+                    "result": result,
+                    "conversation_id": session.conversation_id,
+                    "degraded": bool(error),
+                    "error": error,
+                    "elapsed_ms": elapsed_ms,
+                    "turn_id": turn_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 任何异常都转成 SSE 错误事件
+            yield _sse(
+                "error",
+                {"detail": f"服务端异常：{type(exc).__name__} {exc}", "code": "internal_error"},
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -627,4 +832,24 @@ def resume_session(
         conversation_id=session.conversation_id,
         turns=[TurnSummary(**turn) for turn in turns],
         message="会话已恢复，可以继续提问" if frame is not None else "请先选择要使用的工作表",
+    )
+
+
+@app.delete("/api/sessions/{session_id}", response_model=DeleteSessionResponse)
+def delete_session(
+    session_id: str,
+    user: dict[str, Any] = Depends(auth.get_current_user),
+) -> DeleteSessionResponse:
+    """删除某个文件的全部对话记录（同时清除会话缓存与上传的原始文件）。"""
+    row = chat_store.get_session_row(session_id)
+    if row is None or int(row["user_id"] or 0) != int(user["user_id"]):
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    deleted_turns = chat_store.delete_session(session_id)
+    file_removed = file_store.forget_session(session_id, Path(str(row["file_path"])))
+    return DeleteSessionResponse(
+        detail="已删除该文件的对话记录",
+        session_id=session_id,
+        deleted_turns=deleted_turns,
+        file_removed=file_removed,
     )

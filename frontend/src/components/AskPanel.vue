@@ -1,9 +1,11 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps({
   busy: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
+  /** 对话为空时展示示例问题 */
+  showExamples: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['submit'])
@@ -19,6 +21,8 @@ const EXAMPLES = [
   '列出年龄最大的前 10 条记录',
 ]
 
+const textareaRef = ref(null)
+
 const trimmed = computed(() => question.value.trim())
 const canSubmit = computed(() => !props.busy && !props.disabled && trimmed.value.length > 0)
 
@@ -27,40 +31,37 @@ function submit() {
   emit('submit', trimmed.value)
 }
 
+/** Enter 发送，Shift+Enter 换行；输入法组词中不拦截。 */
 function onKeydown(event) {
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-    event.preventDefault()
-    submit()
-  }
+  if (event.key !== 'Enter' || event.shiftKey) return
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  submit()
 }
 
-function useExample(example) {
+/** 输入框随内容长高（最多 160px），避免长问题把对话框顶得过高。 */
+function autosize() {
+  const el = textareaRef.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+}
+
+watch(question, () => nextTick(autosize))
+
+function useExample(text) {
   if (props.busy) return
-  question.value = example
+  question.value = text
+  nextTick(() => {
+    autosize()
+    textareaRef.value?.focus()
+  })
 }
 </script>
 
 <template>
-  <section class="ask card">
-    <div class="ask__head">
-      <label class="ask__label" for="question-input">提问</label>
-      <span class="ask__counter" :class="{ 'ask__counter--over': question.length > MAX_LENGTH }">
-        {{ question.length }} / {{ MAX_LENGTH }}
-      </span>
-    </div>
-
-    <textarea
-      id="question-input"
-      v-model="question"
-      class="ask__input"
-      rows="3"
-      :maxlength="MAX_LENGTH"
-      :disabled="busy || disabled"
-      placeholder="用中文描述你想统计的内容，例如：年龄大于 40 岁的人有多少？"
-      @keydown="onKeydown"
-    />
-
-    <div class="ask__examples">
+  <div class="composer">
+    <div v-if="showExamples" class="composer__examples">
       <span class="muted">试试：</span>
       <button
         v-for="example in EXAMPLES"
@@ -74,74 +75,44 @@ function useExample(example) {
       </button>
     </div>
 
-    <footer class="ask__foot">
-      <p class="ask__hint muted">
-        Ctrl / ⌘ + Enter 发送 · 追问可省略条件，但尽量描述完整
-      </p>
-      <button class="btn btn--primary" type="button" :disabled="!canSubmit" @click="submit">
+    <div class="composer__box">
+      <textarea
+        ref="textareaRef"
+        v-model="question"
+        class="composer__input"
+        rows="1"
+        :maxlength="MAX_LENGTH"
+        :disabled="busy || disabled"
+        placeholder="问点什么，例如：年龄大于 40 岁的人有多少？"
+        @input="autosize"
+        @keydown="onKeydown"
+      />
+      <button class="btn btn--primary composer__send" type="button" :disabled="!canSubmit" @click="submit">
         <span v-if="busy" class="spinner" aria-hidden="true" />
-        {{ busy ? '正在分析…' : '提交问题' }}
+        {{ busy ? '生成中' : '发送' }}
       </button>
-    </footer>
-  </section>
+    </div>
+
+    <div class="composer__meta">
+      <span>Enter 发送 · Shift + Enter 换行 · 追问可省略条件</span>
+      <span :class="{ 'composer__count--over': question.length > MAX_LENGTH }">
+        {{ question.length }} / {{ MAX_LENGTH }}
+      </span>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.ask {
-  margin-top: 16px;
-  padding: 18px 20px 16px;
-}
-
-.ask__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-}
-
-.ask__label {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.ask__counter {
-  color: var(--muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.ask__counter--over {
-  color: var(--danger);
-}
-
-.ask__input {
-  display: block;
+.composer {
   width: 100%;
-  margin-top: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  font-size: 14px;
-  line-height: 1.6;
-  resize: vertical;
 }
 
-.ask__input:focus {
-  border-color: var(--primary);
-  outline: none;
-}
-
-.ask__input:disabled {
-  background: var(--surface-muted);
-  color: var(--muted);
-}
-
-.ask__examples {
+.composer__examples {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-top: 10px;
+  margin-bottom: 8px;
   font-size: 12px;
 }
 
@@ -164,22 +135,67 @@ function useExample(example) {
   opacity: 0.55;
 }
 
-.ask__foot {
+.composer__box {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.composer__box:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(43, 108, 176, 0.12);
+}
+
+.composer__input {
+  flex: 1;
+  min-height: 24px;
+  max-height: 160px;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+}
+
+.composer__input:disabled {
+  color: var(--muted);
+}
+
+.composer__send {
+  flex: none;
+  padding: 8px 16px;
+  border-radius: 10px;
+}
+
+.composer__meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 14px;
+  margin-top: 6px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
-.ask__hint {
-  font-size: 12px;
+.composer__count--over {
+  color: var(--danger);
 }
 
 @media (max-width: 560px) {
-  .ask__foot {
-    flex-direction: column;
-    align-items: stretch;
+  .composer__meta span:first-child {
+    display: none;
+  }
+
+  .composer__meta {
+    justify-content: flex-end;
   }
 }
 </style>

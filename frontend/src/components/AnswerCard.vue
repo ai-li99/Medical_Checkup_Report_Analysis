@@ -10,7 +10,7 @@ const props = defineProps({
   index: { type: Number, default: 1 },
 })
 
-defineEmits(['retry'])
+defineEmits(['retry', 'stop'])
 
 const KIND_LABEL = {
   count: '计数',
@@ -20,9 +20,16 @@ const KIND_LABEL = {
   unsupported: '无法查询',
 }
 
+const STAGE_LABEL = {
+  generating_query: '正在理解问题、生成查询条件…',
+  querying: '正在执行查询…',
+  answering: '正在生成回答…',
+}
+
 const isPending = computed(() => props.message.status === 'pending')
 const isError = computed(() => props.message.status === 'error')
 const result = computed(() => props.message.result)
+const stageLabel = computed(() => STAGE_LABEL[props.message.stage] ?? '正在解析问题…')
 const specText = computed(() =>
   props.message.querySpec ? JSON.stringify(props.message.querySpec, null, 2) : '',
 )
@@ -101,29 +108,24 @@ onUnmounted(stopTicker)
 
     <p class="answer__question">{{ message.question }}</p>
 
-    <div v-if="isPending" class="answer__pending">
+    <!-- 流式进行中：阶段提示 + 计时 + 停止 -->
+    <div v-if="isPending" class="answer__stream">
       <span class="spinner" aria-hidden="true" />
-      <span>正在解析问题并执行查询，最长约 3 分钟…</span>
+      <span class="answer__stage">{{ stageLabel }}</span>
       <span class="muted">{{ formatDuration(elapsed) }}</span>
+      <button class="btn btn--ghost btn--sm" type="button" @click="$emit('stop')">停止</button>
     </div>
 
-    <template v-else-if="isError">
-      <div class="notice notice--error">{{ message.error }}</div>
-      <div class="answer__actions">
-        <button class="btn btn--sm" type="button" @click="$emit('retry', message)">
-          重试这个问题
-        </button>
-      </div>
-    </template>
+    <div v-if="isError" class="notice notice--error">{{ message.error }}</div>
 
-    <template v-else>
+    <template v-if="!isError">
       <div v-if="message.degraded" class="notice notice--warn">
         <strong>查询未执行成功。</strong>
         <span>{{ message.error || '模型未能给出可执行的查询条件。' }}</span>
       </div>
 
       <div v-if="message.answer" class="answer-body" v-html="answerHtml" />
-      <p v-else class="muted">（模型没有返回文字回答）</p>
+      <p v-else-if="!isPending" class="muted">（模型没有返回文字回答）</p>
 
       <section v-if="result" class="answer__result">
         <header class="answer__result-head">
@@ -143,11 +145,7 @@ onUnmounted(stopTicker)
           <span class="muted">{{ result.note || '条记录' }}</span>
         </div>
 
-        <ResultTable
-          v-else
-          :columns="result.columns || []"
-          :rows="result.rows || []"
-        />
+        <ResultTable v-else :columns="result.columns || []" :rows="result.rows || []" />
 
         <p v-if="result.note && scalarValue === null" class="answer__note muted">
           {{ result.note }}
@@ -164,12 +162,18 @@ onUnmounted(stopTicker)
         <pre class="answer__pre">{{ message.rawOutput }}</pre>
       </details>
     </template>
+
+    <div v-if="isError" class="answer__actions">
+      <button class="btn btn--sm" type="button" @click="$emit('retry', message)">
+        重试这个问题
+      </button>
+    </div>
   </article>
 </template>
 
 <style scoped>
 .answer {
-  padding: 16px 18px;
+  padding: 14px 16px;
 }
 
 .answer--error {
@@ -208,8 +212,9 @@ onUnmounted(stopTicker)
   word-break: break-word;
 }
 
-.answer__pending {
+.answer__stream {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-top: 10px;
@@ -217,8 +222,16 @@ onUnmounted(stopTicker)
   font-size: 13px;
 }
 
-.answer__pending .spinner {
+.answer__stream .spinner {
   color: var(--primary);
+}
+
+.answer__stage {
+  color: var(--text);
+}
+
+.answer__stream .btn {
+  margin-left: auto;
 }
 
 .answer__actions {

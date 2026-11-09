@@ -195,3 +195,10 @@ class ResumeResponse(BaseModel):
     conversation_id: str = ""
     turns: list[TurnSummary] = Field(default_factory=list)
     message: str = ""
+
+
+class DeleteSessionResponse(BaseModel):
+    detail: str
+    session_id: str
+    deleted_turns: int
+    file_removed: bool

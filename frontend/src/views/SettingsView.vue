@@ -16,7 +16,11 @@ const busy = ref(false)
 const showPassword = ref(false)
 
 const canSubmit = computed(
-  () => !busy.value && form.value.newPassword.length > 0 && form.value.confirm.length > 0,
+  () =>
+    !busy.value &&
+    form.value.oldPassword.length > 0 &&
+    form.value.newPassword.length > 0 &&
+    form.value.confirm.length > 0,
 )
 
 const newPasswordHint = computed(() => {
@@ -29,9 +33,10 @@ const newPasswordHint = computed(() => {
 
 function validate() {
   const { oldPassword, newPassword, confirm } = form.value
+  if (!oldPassword) return '请输入原密码'
   if (newPassword.length < PASSWORD_MIN) return `密码至少 ${PASSWORD_MIN} 位`
   if (newPassword.length > PASSWORD_MAX) return `密码最多 ${PASSWORD_MAX} 位`
-  if (oldPassword && oldPassword === newPassword) return '新密码不能与原密码相同'
+  if (oldPassword === newPassword) return '新密码不能与原密码相同'
   if (newPassword !== confirm) return '两次输入的新密码不一致'
   return ''
 }
@@ -46,7 +51,7 @@ async function submit() {
   try {
     await resetPassword({
       newPassword: form.value.newPassword,
-      oldPassword: form.value.oldPassword || undefined,
+      oldPassword: form.value.oldPassword,
     })
     // 后端已作废所有令牌，store 里也清空了登录态。
     pushToast('密码已重置，请用新密码重新登录', 'success')
@@ -96,7 +101,7 @@ async function submit() {
               class="auth-input"
               :type="showPassword ? 'text' : 'password'"
               autocomplete="current-password"
-              placeholder="可不填；填写则会校验"
+              placeholder="请输入原密码"
               :disabled="busy"
             />
             <button

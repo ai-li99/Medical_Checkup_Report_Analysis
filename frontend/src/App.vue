@@ -11,6 +11,8 @@ const router = useRouter()
 
 /** 登录/注册页用独立布局，不套业务页外壳。 */
 const isAuthLayout = computed(() => route.meta.layout === 'auth')
+/** 工作台用「整屏 + 内部滚动」布局，让对话框固定在底部。 */
+const isAppLayout = computed(() => route.name === 'home')
 const initial = computed(() => (auth.user?.username ?? '?').slice(0, 1).toUpperCase())
 
 const loggingOut = ref(false)
@@ -31,7 +33,7 @@ async function onLogout() {
 <template>
   <RouterView v-if="isAuthLayout" />
 
-  <div v-else class="shell">
+  <div v-else class="shell" :class="{ 'shell--app': isAppLayout }">
     <header class="shell__header">
       <div class="shell__left">
         <RouterLink to="/home" class="brand">
@@ -74,6 +76,22 @@ async function onLogout() {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+}
+
+/* 工作台：整屏固定，页面不整滚动，只有对话区内部滚动。 */
+.shell--app {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.shell--app .shell__main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: 16px;
+  padding-bottom: 12px;
 }
 
 .shell__header {

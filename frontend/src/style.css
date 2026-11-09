@@ -140,6 +140,28 @@ input {
   font-size: 12px;
 }
 
+.btn--danger {
+  border-color: transparent;
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: #991b1b;
+  border-color: transparent;
+}
+
+.btn--danger-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--danger);
+}
+
+.btn--danger-ghost:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: transparent;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

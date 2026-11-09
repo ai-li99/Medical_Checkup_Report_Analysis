@@ -152,7 +152,11 @@ async function performRefresh() {
   return payload.access_token
 }
 
-function refreshAccessToken() {
+/**
+ * 供 SSE 等自己发请求的场景复用：保证同一时刻只刷新一次。
+ * 刷新失败会抛出 ApiError，且内部已清空本地令牌。
+ */
+export function refreshAccessToken() {
   if (!refreshPromise) {
     refreshPromise = performRefresh().finally(() => {
       refreshPromise = null
