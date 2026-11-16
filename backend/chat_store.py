@@ -55,6 +55,22 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS idx_sessions_user ON chat_sessions(user_id, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_turns_session ON chat_turns(session_id, id)",
     "CREATE INDEX IF NOT EXISTS idx_turns_user ON chat_turns(user_id, id DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS chat_reports (
+        file_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        pdf_path TEXT NOT NULL,
+        unit_name TEXT NOT NULL,
+        prepared_by TEXT NOT NULL,
+        reviewed_by TEXT NOT NULL,
+        report_date TEXT NOT NULL,
+        version TEXT NOT NULL,
+        stats_json TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_reports_session ON chat_reports(session_id)",
 )
 
 
@@ -333,3 +349,77 @@ def delete_session(session_id: str) -> int:
         turns = int(cursor.rowcount or 0)
         connection.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
     return turns
+
+
+# --------------------------------------------------------------------------
+# 报告（PDF 缓存）
+# --------------------------------------------------------------------------
+def get_session_row_by_file_id(file_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM chat_sessions WHERE file_id = ?", (file_id,)
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_report(file_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM chat_reports WHERE file_id = ?", (file_id,)
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_report(
+    *,
+    file_id: str,
+    session_id: str,
+    user_id: int,
+    pdf_path: str,
+    unit_name: str,
+    prepared_by: str,
+    reviewed_by: str,
+    report_date: str,
+    version: str,
+    stats_json: str,
+) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO chat_reports"
+            " (file_id, session_id, user_id, pdf_path, unit_name, prepared_by,"
+            "  reviewed_by, report_date, version, stats_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                file_id,
+                session_id,
+                int(user_id),
+                pdf_path,
+                unit_name,
+                prepared_by,
+                reviewed_by,
+                report_date,
+                version,
+                stats_json,
+                _now_iso(),
+            ),
+        )
+
+
+def delete_report_by_session(session_id: str) -> dict[str, Any] | None:
+    return _delete_report("session_id", session_id)
+
+
+def delete_report_by_file(file_id: str) -> dict[str, Any] | None:
+    return _delete_report("file_id", file_id)
+
+
+def _delete_report(column: str, value: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            f"SELECT * FROM chat_reports WHERE {column} = ?", (value,)
+        ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        connection.execute("DELETE FROM chat_reports WHERE file_id = ?", (payload["file_id"],))
+    return payload

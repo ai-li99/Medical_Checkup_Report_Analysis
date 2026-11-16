@@ -2,11 +2,15 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import { healthy } from '@/api'
+import { generateReportPdf } from '@/api/report'
 import AnswerCard from '@/components/AnswerCard.vue'
 import AskPanel from '@/components/AskPanel.vue'
 import ColumnTable from '@/components/ColumnTable.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import SheetPicker from '@/components/SheetPicker.vue'
 import UploadDropzone from '@/components/UploadDropzone.vue'
+import { pushToast } from '@/composables/useToast'
+import { auth } from '@/stores/auth'
 import {
   askQuestion,
   confirmSheets,
@@ -16,7 +20,9 @@ import {
   stopGeneration,
   uploadReport,
 } from '@/stores/session'
+import { saveBlob } from '@/utils/download'
 import { formatNumber } from '@/utils/format'
+import { getReportCover, saveReportCover } from '@/utils/reportPrefs'
 
 const question = ref('')
 const payload = computed(() => session.payload)
@@ -76,6 +82,88 @@ function startOver() {
   resetSession()
   question.value = ''
   showColumns.value = false
+}
+
+/* ---------- 生成分析报告 PDF ---------- */
+const reportOpen = ref(false)
+const reportBusy = ref(false)
+const reportForm = ref({ unitName: '', preparedBy: '', reviewedBy: '', reportDate: '' })
+
+/** 报告按 file_id 生成；历史会话 resume 现在也会返回 file_id。 */
+const canGenerateReport = computed(() => Boolean(session.payload?.fileId))
+
+const reportReady = computed(
+  () =>
+    reportForm.value.unitName.trim().length > 0 &&
+    reportForm.value.preparedBy.trim().length > 0 &&
+    reportForm.value.reviewedBy.trim().length > 0,
+)
+
+/** 同一份文件的封面参数记在浏览器里，下次自动带出。 */
+const reportCoverKey = computed(() => {
+  const file = session.payload?.filename || session.payload?.fileId || ''
+  if (!file) return ''
+  return `${auth.user?.username ?? 'anon'}::${file}`
+})
+
+const reportButtonHint = computed(() => {
+  if (reportBusy.value) return '正在生成报告，完成后会自动下载'
+  if (!canGenerateReport.value) return '当前会话没有文件信息，重新上传后可生成报告'
+  return '按当前文件生成团体体检分析报告 PDF'
+})
+
+function todayISO() {
+  const now = new Date()
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
+function openReportDialog() {
+  if (!canGenerateReport.value || reportBusy.value) return
+
+  const remembered = getReportCover(reportCoverKey.value)
+  reportForm.value = {
+    unitName: remembered?.unitName ?? '',
+    preparedBy: remembered?.preparedBy || auth.user?.username || '',
+    reviewedBy: remembered?.reviewedBy ?? '',
+    reportDate: remembered?.reportDate || todayISO(),
+  }
+  reportOpen.value = true
+}
+
+async function submitReport() {
+  if (!reportReady.value || reportBusy.value || !canGenerateReport.value) return
+
+  // 记住这次填的内容，下次打开同一文件直接带出
+  saveReportCover(reportCoverKey.value, reportForm.value)
+
+  // 立刻关弹窗：生成期间用户可以去干别的，只靠按钮状态提示
+  reportOpen.value = false
+  reportBusy.value = true
+
+  try {
+    const result = await generateReportPdf({
+      fileId: session.payload.fileId,
+      unitName: reportForm.value.unitName,
+      preparedBy: reportForm.value.preparedBy,
+      reviewedBy: reportForm.value.reviewedBy,
+      reportDate: reportForm.value.reportDate,
+    })
+
+    saveBlob(result.blob, result.filename)
+
+    if (result.narrative === 'fallback') {
+      pushToast('报告已生成；叙述部分由模板兜底（模型输出未通过校验）', 'info', 6000)
+    } else if (result.cached) {
+      pushToast('报告已生成（命中缓存）', 'success')
+    } else {
+      pushToast('报告已生成，开始下载', 'success')
+    }
+  } catch (error) {
+    pushToast(error?.message ?? '生成报告失败，请重试', 'error', 6000)
+  } finally {
+    reportBusy.value = false
+  }
 }
 
 /* ---------- 聊天区滚动 ---------- */
@@ -217,6 +305,16 @@ const FLOW = [
         </div>
         <div class="chat__actions">
           <button
+            class="btn btn--sm"
+            type="button"
+            :disabled="!canGenerateReport || reportBusy"
+            :title="reportButtonHint"
+            @click="openReportDialog"
+          >
+            <span v-if="reportBusy" class="spinner" aria-hidden="true" />
+            {{ reportBusy ? 'PDF 生成中…' : '生成分析报告 PDF' }}
+          </button>
+          <button
             class="btn btn--ghost btn--sm"
             type="button"
             :aria-expanded="showColumns"
@@ -257,6 +355,68 @@ const FLOW = [
         />
       </footer>
     </div>
+
+    <ConfirmDialog
+      :open="reportOpen"
+      title="生成分析报告 PDF"
+      confirm-text="生成并下载"
+      cancel-text="取消"
+      :confirm-disabled="!reportReady"
+      @cancel="reportOpen = false"
+      @confirm="submitReport"
+    >
+      <form class="report-form" @submit.prevent="submitReport">
+        <label class="report-field">
+          <span class="report-label">受检单位 <i>*</i></span>
+          <input
+            v-model="reportForm.unitName"
+            class="auth-input"
+            type="text"
+            maxlength="100"
+            placeholder="例如：XX 医院体检中心"
+            :disabled="reportBusy"
+          />
+        </label>
+
+        <label class="report-field">
+          <span class="report-label">编制人 <i>*</i></span>
+          <input
+            v-model="reportForm.preparedBy"
+            class="auth-input"
+            type="text"
+            maxlength="50"
+            placeholder="填写编制人姓名"
+            :disabled="reportBusy"
+          />
+        </label>
+
+        <label class="report-field">
+          <span class="report-label">医学审核 <i>*</i></span>
+          <input
+            v-model="reportForm.reviewedBy"
+            class="auth-input"
+            type="text"
+            maxlength="50"
+            placeholder="填写审核人姓名"
+            :disabled="reportBusy"
+          />
+        </label>
+
+        <label class="report-field">
+          <span class="report-label">报告日期</span>
+          <input
+            v-model="reportForm.reportDate"
+            class="auth-input"
+            type="date"
+            :disabled="reportBusy"
+          />
+        </label>
+      </form>
+
+      <p class="report-note">
+        生成时弹窗会自动关闭，可继续做别的事，完成后自动下载；封面信息会记住，同一文件下次自动带出。
+      </p>
+    </ConfirmDialog>
   </div>
 </template>
 
@@ -529,6 +689,35 @@ const FLOW = [
   padding-top: 8px;
   border-top: 1px solid var(--border);
   background: var(--bg);
+}
+
+/* ---------- 生成报告弹窗 ---------- */
+.report-form {
+  display: grid;
+  gap: 10px;
+}
+
+.report-field {
+  display: grid;
+  gap: 4px;
+}
+
+.report-label {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.report-label i {
+  color: var(--danger);
+  font-style: normal;
+}
+
+.report-note {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 @media (max-width: 640px) {

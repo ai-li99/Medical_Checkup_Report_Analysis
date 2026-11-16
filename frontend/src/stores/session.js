@@ -71,6 +71,8 @@ export function forgetSession(sessionId) {
 function applyUpload(data) {
   session.payload = {
     sessionId: data.session_id,
+    // file_id 是生成体检报告 PDF 的唯一凭据（历史会话恢复时拿不到，见 resumeFromHistory）
+    fileId: data.file_id ?? '',
     filename: data.filename,
     type: data.type,
     rows: data.rows ?? 0,
@@ -374,6 +376,8 @@ export async function resumeFromHistory(sessionId) {
 
     session.payload = {
       sessionId: data.session_id,
+      // 后端 resume 已返回 file_id，历史会话也能直接生成报告 PDF
+      fileId: data.file_id ?? '',
       filename: data.filename,
       type: '',
       rows: data.row_count ?? 0,

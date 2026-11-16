@@ -188,6 +188,7 @@ class TurnDetailResponse(BaseModel):
 
 class ResumeResponse(BaseModel):
     session_id: str
+    file_id: str = ""
     filename: str
     row_count: int
     column_count: int
@@ -202,3 +203,11 @@ class DeleteSessionResponse(BaseModel):
     session_id: str
     deleted_turns: int
     file_removed: bool
+
+
+class GetPdfRequest(BaseModel):
+    file_id: str = Field(min_length=1, max_length=64)
+    unit_name: str = Field(min_length=1, max_length=100)
+    prepared_by: str = Field(min_length=1, max_length=50)
+    reviewed_by: str = Field(min_length=1, max_length=50)
+    report_date: str = Field(default="", max_length=20)

@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
 import AnswerCard from '@/components/AnswerCard.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { deleteSession, fetchHistory, fetchSessionTurns, fetchTurnDetail } from '@/api'
 import { pushToast } from '@/composables/useToast'
 import { forgetSession, resumeFromHistory, turnToMessage } from '@/stores/session'
@@ -28,8 +29,8 @@ const activeTurnId = ref(null)
 const detailLoadingId = ref(null)
 
 const resumingId = ref('')
-/** 是否处于「确认删除」状态（删除会连原始文件一起删，必须二次确认） */
-const confirmingDelete = ref(false)
+/** 删除确认弹窗（删除会连原始文件一起删） */
+const deleteDialogOpen = ref(false)
 const deleting = ref(false)
 
 const hasMore = computed(() => sessions.value.length < total.value)
@@ -68,7 +69,7 @@ async function selectSession(item) {
 
   activeId.value = item.session_id
   activeTurnId.value = null
-  confirmingDelete.value = false
+  deleteDialogOpen.value = false
   turns.value = []
   turnsError.value = ''
   turnsLoading.value = true
@@ -137,11 +138,7 @@ onMounted(() => loadSessions())
 
 function requestDelete() {
   if (!activeSession.value || deleting.value) return
-  confirmingDelete.value = true
-}
-
-function cancelDelete() {
-  confirmingDelete.value = false
+  deleteDialogOpen.value = true
 }
 
 async function confirmDelete() {
@@ -154,13 +151,13 @@ async function confirmDelete() {
 
     // 工作台如果正开着这个会话，一起清掉，避免继续对着已删除的 session 提问
     forgetSession(item.session_id)
+    deleteDialogOpen.value = false
 
     sessions.value = sessions.value.filter((entry) => entry.session_id !== item.session_id)
     total.value = Math.max(0, total.value - 1)
     activeId.value = ''
     activeTurnId.value = null
     turns.value = []
-    confirmingDelete.value = false
 
     const turnsDeleted = Number(result?.deleted_turns) || 0
     pushToast(
@@ -176,6 +173,7 @@ async function confirmDelete() {
       await loadSessions()
     }
   } catch (error) {
+    deleteDialogOpen.value = false
     if (error?.status === 404) {
       pushToast('记录不存在或已被删除', 'error')
       await loadSessions()
@@ -261,45 +259,27 @@ async function confirmDelete() {
               </p>
             </div>
             <div class="detail-head__actions">
-              <template v-if="confirmingDelete">
-                <span class="detail-head__warn">会连同原始文件一起删除</span>
-                <button class="btn btn--sm" type="button" :disabled="deleting" @click="cancelDelete">
-                  取消
-                </button>
-                <button
-                  class="btn btn--danger btn--sm"
-                  type="button"
-                  :disabled="deleting"
-                  @click="confirmDelete"
-                >
-                  <span v-if="deleting" class="spinner" aria-hidden="true" />
-                  {{ deleting ? '删除中…' : '确认删除' }}
-                </button>
-              </template>
-
-              <template v-else>
-                <button
-                  class="btn btn--primary btn--sm"
-                  type="button"
-                  :disabled="Boolean(resumingId) || deleting"
-                  @click="resume(activeSession)"
-                >
-                  <span
-                    v-if="resumingId === activeSession.session_id"
-                    class="spinner"
-                    aria-hidden="true"
-                  />
-                  {{ resumingId === activeSession.session_id ? '正在恢复…' : '继续问' }}
-                </button>
-                <button
-                  class="btn btn--danger-ghost btn--sm"
-                  type="button"
-                  :disabled="deleting"
-                  @click="requestDelete"
-                >
-                  删除
-                </button>
-              </template>
+              <button
+                class="btn btn--primary btn--sm"
+                type="button"
+                :disabled="Boolean(resumingId) || deleting"
+                @click="resume(activeSession)"
+              >
+                <span
+                  v-if="resumingId === activeSession.session_id"
+                  class="spinner"
+                  aria-hidden="true"
+                />
+                {{ resumingId === activeSession.session_id ? '正在恢复…' : '继续问' }}
+              </button>
+              <button
+                class="btn btn--danger-ghost btn--sm"
+                type="button"
+                :disabled="deleting"
+                @click="requestDelete"
+              >
+                删除
+              </button>
             </div>
           </header>
 
@@ -346,6 +326,27 @@ async function confirmDelete() {
         </template>
       </section>
     </div>
+
+    <ConfirmDialog
+      :open="deleteDialogOpen"
+      title="删除这个会话？"
+      confirm-text="确认删除"
+      cancel-text="取消"
+      danger
+      center
+      :busy="deleting"
+      @cancel="deleteDialogOpen = false"
+      @confirm="confirmDelete"
+    >
+      <div class="delete">
+        <span class="delete__icon" aria-hidden="true">!</span>
+        <p class="delete__file">{{ activeSession?.filename }}</p>
+        <p class="delete__warn">删除不可撤销，上传的文件会一并删除。</p>
+        <p class="delete__meta">
+          该会话的 {{ formatNumber(activeSession?.turn_count ?? 0) }} 轮问答记录将一并清除。
+        </p>
+      </div>
+    </ConfirmDialog>
   </div>
 </template>
 
@@ -472,9 +473,41 @@ async function confirmDelete() {
   gap: 6px;
 }
 
-.detail-head__warn {
+/* ---------- 删除确认弹窗内容 ---------- */
+.delete {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+
+.delete__icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 2px;
+  border-radius: 50%;
+  background: var(--danger-soft);
   color: var(--danger);
-  font-size: 12px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.delete__file {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.delete__warn {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.delete__meta {
+  color: var(--muted);
+  font-size: 12.5px;
 }
 
 .detail-head__name {

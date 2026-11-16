@@ -34,8 +34,10 @@ def _env_int(name: str, default: int) -> int:
 DIFY_BASE_URL = _env_str("DIFY_BASE_URL", "http://47.114.83.33/v1").rstrip("/")
 DIFY_APP1_KEY = _env_str("DIFY_APP1_KEY")
 DIFY_APP2_KEY = _env_str("DIFY_APP2_KEY")
+DIFY_APP3_KEY = _env_str("DIFY_APP3_KEY")
 DIFY_APP1_PATH = "/workflows/run"
 DIFY_APP2_PATH = "/chat-messages"
+DIFY_APP3_PATH = "/workflows/run"
 DIFY_TIMEOUT_SECONDS = _env_int("DIFY_TIMEOUT_SECONDS", 180)
 DIFY_USER_PREFIX = "medical-report"
 
@@ -89,3 +91,12 @@ AUTH_DB_PATH = DB_PATH  # 兼容旧名
 HISTORY_PAGE_SIZE = _env_int("HISTORY_PAGE_SIZE", 20)
 HISTORY_MAX_PAGE_SIZE = _env_int("HISTORY_MAX_PAGE_SIZE", 100)
 HISTORY_TURNS_FOR_CONTEXT = _env_int("HISTORY_TURNS_FOR_CONTEXT", 50)
+
+# ---------- 体检报告 PDF ----------
+REPORTS_DIR = Path(_env_str("REPORTS_DIR", "reports"))
+if not REPORTS_DIR.is_absolute():
+    REPORTS_DIR = BACKEND_DIR / REPORTS_DIR
+REPORT_VERSION = _env_str("REPORT_VERSION", "v1.0")
+REPORT_FOCUS_MIN = _env_int("REPORT_FOCUS_MIN", 5)
+REPORT_FOCUS_MAX = _env_int("REPORT_FOCUS_MAX", 8)
+REPORT_MIN_VALID = _env_int("REPORT_MIN_VALID", 10)

@@ -16,6 +16,10 @@ uploads/
 backend/data/
 data/
 
+# 生成的 PDF 报告
+backend/reports/
+reports/
+
 # 前端
 frontend/node_modules/
 frontend/dist/
@@ -30,3 +34,7 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 /samples/
+/.tmp/
+/docs/
+/frontend_diff/
+/体检报告模板.docx

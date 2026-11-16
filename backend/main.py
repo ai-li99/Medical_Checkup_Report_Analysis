@@ -13,16 +13,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 import auth
@@ -30,10 +32,14 @@ import auth_store
 import chat_store
 import config
 import file_store
+import report_pdf
+import report_service
+import report_stats
 from dify_client import DifyError, chat, chat_stream, extract_json_object, run_workflow, strip_reasoning
 from models import (
     AuthResponse,
     DeleteSessionResponse,
+    GetPdfRequest,
     HistorySessionItem,
     HistorySessionsResponse,
     LoginRequest,
@@ -58,10 +64,13 @@ from models import (
 )
 from query_spec import SpecError, execute, format_for_llm
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     file_store.ensure_upload_dir()
+    config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     auth_store.init_db()
     chat_store.init_db()
     yield
@@ -514,6 +523,7 @@ async def select_sheets(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _invalidate_report(session.session_id)
     frame = session.df
     rows = int(len(frame)) if frame is not None else 0
     columns = int(len(frame.columns)) if frame is not None else 0
@@ -743,6 +753,130 @@ async def submit_stream(
 
 
 # --------------------------------------------------------------------------
+# 体检报告 PDF
+# --------------------------------------------------------------------------
+def _validate_report_date(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return date.today().isoformat()
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="report_date 格式应为 YYYY-MM-DD") from exc
+
+
+def _report_info(payload: GetPdfRequest, report_date: str) -> dict[str, Any]:
+    return {
+        "unit_name": payload.unit_name.strip(),
+        "prepared_by": payload.prepared_by.strip(),
+        "reviewed_by": payload.reviewed_by.strip(),
+        "report_date": report_date,
+        "version": config.REPORT_VERSION,
+    }
+
+
+def _same_report_info(row: dict[str, Any], info: dict[str, Any]) -> bool:
+    return all(
+        str(row.get(key) or "") == str(info[key])
+        for key in ("unit_name", "prepared_by", "reviewed_by", "report_date", "version")
+    )
+
+
+def _remove_file(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _invalidate_report(session_id: str) -> None:
+    """数据变化（重新选表 / 删除会话）时作废已生成的报告。"""
+    row = chat_store.delete_report_by_session(session_id)
+    if row:
+        _remove_file(row.get("pdf_path"))
+
+
+def _pdf_response(
+    path: str, info: dict[str, Any], cached: bool, narrative_ok: bool | None
+) -> FileResponse:
+    if narrative_ok is None:
+        narrative_state = "cached"
+    else:
+        narrative_state = "llm" if narrative_ok else "fallback"
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=f"{info['unit_name']}体检分析报告.pdf",
+        headers={
+            "X-Report-Cached": "true" if cached else "false",
+            "X-Report-Narrative": narrative_state,
+        },
+    )
+
+
+@app.post("/api/get_pdf")
+async def get_pdf(
+    payload: GetPdfRequest,
+    user: dict[str, Any] = Depends(auth.get_current_user),
+) -> FileResponse:
+    """按 file_id 生成（或复用）团体体检分析报告 PDF。"""
+    file_id = payload.file_id.strip()
+    session_row = chat_store.get_session_row_by_file_id(file_id)
+    if session_row is None or int(session_row["user_id"] or 0) != int(user["user_id"]):
+        raise HTTPException(status_code=404, detail="文件不存在或无权访问")
+
+    report_date = _validate_report_date(payload.report_date)
+    info = _report_info(payload, report_date)
+
+    existing = chat_store.get_report(file_id)
+    if existing and _same_report_info(existing, info) and Path(existing["pdf_path"]).exists():
+        return _pdf_response(
+            existing["pdf_path"], info, cached=True, narrative_ok=None
+        )
+
+    session = file_store.get_session(session_row["id"], user_id=user["user_id"])
+    if session.df is None:
+        raise HTTPException(
+            status_code=400, detail="请先选择要分析的工作表（调用 /api/select_sheets）"
+        )
+
+    stats = await run_in_threadpool(
+        report_stats.build_report_stats,
+        session.df,
+        unit_name=info["unit_name"],
+        source_file=session.filename,
+        report_date=info["report_date"],
+        version=info["version"],
+        focus_min=config.REPORT_FOCUS_MIN,
+        focus_max=config.REPORT_FOCUS_MAX,
+        min_valid=config.REPORT_MIN_VALID,
+    )
+    narrative, problems = await report_service.build_narrative(stats)
+    if problems:
+        logger.warning("应用3 叙述不可用，使用模板文字：%s", "；".join(problems))
+
+    config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    pdf_path = config.REPORTS_DIR / f"{file_id}.pdf"
+    await run_in_threadpool(report_pdf.build_report_pdf, pdf_path, stats, narrative, info)
+
+    chat_store.save_report(
+        file_id=file_id,
+        session_id=session.session_id,
+        user_id=user["user_id"],
+        pdf_path=str(pdf_path),
+        unit_name=info["unit_name"],
+        prepared_by=info["prepared_by"],
+        reviewed_by=info["reviewed_by"],
+        report_date=info["report_date"],
+        version=info["version"],
+        stats_json=json.dumps(stats, ensure_ascii=False),
+    )
+    return _pdf_response(str(pdf_path), info, cached=False, narrative_ok=narrative is not None)
+
+
+# --------------------------------------------------------------------------
 # 历史记录
 # --------------------------------------------------------------------------
 @app.get("/api/history", response_model=HistorySessionsResponse)
@@ -825,6 +959,7 @@ def resume_session(
     frame = session.df
     return ResumeResponse(
         session_id=session.session_id,
+        file_id=session.file_id,
         filename=session.filename,
         row_count=int(len(frame)) if frame is not None else 0,
         column_count=int(len(frame.columns)) if frame is not None else 0,
@@ -846,6 +981,7 @@ def delete_session(
         raise HTTPException(status_code=404, detail="会话不存在")
 
     deleted_turns = chat_store.delete_session(session_id)
+    _invalidate_report(session_id)
     file_removed = file_store.forget_session(session_id, Path(str(row["file_path"])))
     return DeleteSessionResponse(
         detail="已删除该文件的对话记录",

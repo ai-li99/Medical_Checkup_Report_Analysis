@@ -20,6 +20,8 @@ from config import (
     DIFY_APP1_PATH,
     DIFY_APP2_KEY,
     DIFY_APP2_PATH,
+    DIFY_APP3_KEY,
+    DIFY_APP3_PATH,
     DIFY_BASE_URL,
     DIFY_TIMEOUT_SECONDS,
     DIFY_USER_PREFIX,
@@ -147,6 +149,21 @@ async def chat(user_query: str, data_text: str, conversation_id: str, user: str)
         "conversation_id": str(body.get("conversation_id") or conversation_id or ""),
         "message_id": str(body.get("message_id") or body.get("id") or ""),
     }
+
+
+async def run_report_workflow(report_stats_text: str) -> str:
+    """调用应用3：统计 JSON -> 报告叙述 JSON 文本。"""
+    payload = {
+        "inputs": {"report_stats": report_stats_text},
+        "response_mode": "blocking",
+        "user": f"{DIFY_USER_PREFIX}-report",
+    }
+    body = await _post(DIFY_APP3_PATH, DIFY_APP3_KEY, payload)
+    data = body.get("data") or {}
+    status = data.get("status")
+    if status and status != "succeeded":
+        raise DifyError(f"应用3 执行未成功：{status} {data.get('error') or ''}".strip())
+    return extract_output_text(data.get("outputs") or {})
 
 
 async def chat_stream(
