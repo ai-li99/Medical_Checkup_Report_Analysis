@@ -775,13 +775,6 @@ def _report_info(payload: GetPdfRequest, report_date: str) -> dict[str, Any]:
     }
 
 
-def _same_report_info(row: dict[str, Any], info: dict[str, Any]) -> bool:
-    return all(
-        str(row.get(key) or "") == str(info[key])
-        for key in ("unit_name", "prepared_by", "reviewed_by", "report_date", "version")
-    )
-
-
 def _remove_file(path: str | None) -> None:
     if not path:
         return
@@ -789,6 +782,16 @@ def _remove_file(path: str | None) -> None:
         Path(path).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _load_json(text: Any) -> dict[str, Any] | None:
+    if not text:
+        return None
+    try:
+        loaded = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def _invalidate_report(session_id: str) -> None:
@@ -830,11 +833,40 @@ async def get_pdf(
     report_date = _validate_report_date(payload.report_date)
     info = _report_info(payload, report_date)
 
+    # 同一 file_id 已有报告：正文沿用旧内容（旧统计 + 旧叙述），只按新参数重绘封面
     existing = chat_store.get_report(file_id)
-    if existing and _same_report_info(existing, info) and Path(existing["pdf_path"]).exists():
-        return _pdf_response(
-            existing["pdf_path"], info, cached=True, narrative_ok=None
-        )
+    if existing and Path(existing["pdf_path"]).exists():
+        stored_stats = _load_json(existing.get("stats_json"))
+        # narrative_json 为 NULL 说明是升级前的老报告，没存叙述文本；先完整重建一次再走封面重绘
+        legacy = existing.get("narrative_json") is None
+        if stored_stats is not None and not legacy:
+            stored_narrative = _load_json(existing.get("narrative_json"))
+            await run_in_threadpool(
+                report_pdf.build_report_pdf,
+                Path(existing["pdf_path"]),
+                stored_stats,
+                stored_narrative,
+                info,
+            )
+            chat_store.save_report(
+                file_id=file_id,
+                session_id=existing["session_id"],
+                user_id=user["user_id"],
+                pdf_path=existing["pdf_path"],
+                unit_name=info["unit_name"],
+                prepared_by=info["prepared_by"],
+                reviewed_by=info["reviewed_by"],
+                report_date=info["report_date"],
+                version=info["version"],
+                stats_json=existing.get("stats_json") or "",
+                narrative_json=existing.get("narrative_json") or "",
+            )
+            return _pdf_response(
+                existing["pdf_path"],
+                info,
+                cached=True,
+                narrative_ok=stored_narrative is not None,
+            )
 
     session = file_store.get_session(session_row["id"], user_id=user["user_id"])
     if session.df is None:
@@ -872,6 +904,7 @@ async def get_pdf(
         report_date=info["report_date"],
         version=info["version"],
         stats_json=json.dumps(stats, ensure_ascii=False),
+        narrative_json=json.dumps(narrative, ensure_ascii=False) if narrative is not None else "",
     )
     return _pdf_response(str(pdf_path), info, cached=False, narrative_ok=narrative is not None)
 

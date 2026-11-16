@@ -67,6 +67,7 @@ _SCHEMA = (
         report_date TEXT NOT NULL,
         version TEXT NOT NULL,
         stats_json TEXT,
+        narrative_json TEXT,
         created_at TEXT NOT NULL
     )
     """,
@@ -96,6 +97,13 @@ def init_db() -> None:
     with _connect() as connection:
         for statement in _SCHEMA:
             connection.execute(statement)
+        _ensure_column(connection, "chat_reports", "narrative_json", "narrative_json TEXT")
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 # --------------------------------------------------------------------------
@@ -382,13 +390,14 @@ def save_report(
     report_date: str,
     version: str,
     stats_json: str,
+    narrative_json: str = "",
 ) -> None:
     with _connect() as connection:
         connection.execute(
             "INSERT OR REPLACE INTO chat_reports"
             " (file_id, session_id, user_id, pdf_path, unit_name, prepared_by,"
-            "  reviewed_by, report_date, version, stats_json, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  reviewed_by, report_date, version, stats_json, narrative_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 file_id,
                 session_id,
@@ -400,6 +409,7 @@ def save_report(
                 report_date,
                 version,
                 stats_json,
+                narrative_json,
                 _now_iso(),
             ),
         )

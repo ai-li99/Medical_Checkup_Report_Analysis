@@ -986,8 +986,9 @@ async function streamAsk(sessionId, { onStage, onResult, onDelta, onDone }) {
 ### 缓存规则
 
 - PDF 存到 `backend/reports/{file_id}.pdf`，索引在数据库 `chat_reports` 表
-- 同一 `file_id` + 相同封面参数 → 直接返回缓存（秒回）
-- 封面参数变化（单位/编制/审核/日期/版本）→ **重新生成并覆盖**
+- 同一 `file_id` 已有报告 → **正文沿用旧报告**（不重新统计、不调用应用3），只按本次请求的封面参数**重绘封面页**
+- 响应头 `X-Report-Cached: true` 表示正文来自旧报告；封面始终按本次请求参数生成
+- 需要重新统计（例如换了工作表或文件）→ 重新选择工作表 / 删除会话让报告作废，下次调用会完整重建
 - 重新调用 `/api/select_sheets` → 报告作废（数据变了）
 - 删除会话（`DELETE /api/sessions/{id}`）→ 报告与 PDF 一并删除
 
